@@ -351,9 +351,8 @@ def score_trip(
         # actual_m = full GPS path; min_feasible_total = full closed-loop expected.
         detour_ratio = (actual_m / min_feasible_total) if min_feasible_total > 0 else None
     else:
-        # Fallback: corridor scoring unavailable
         total_pts = len(path)
-        outside_pts = total_pts  # conservative: treat all as unknown
+        outside_pts = total_pts
         max_dev_m = 0.0
         compliance = 0.0
         worst_leg = None
@@ -386,6 +385,7 @@ def score_trip(
         max_deviation_m=round(max_dev_m, 1),
         worst_leg_idx=worst_leg,
         leg_scores=leg_scores,
+        message="" if leg_scores else "Không tính được km kỳ vọng vì corridor rỗng hoặc stop không có tọa độ hợp lệ",
     )
 
 

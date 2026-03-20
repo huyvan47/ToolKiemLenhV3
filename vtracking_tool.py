@@ -459,8 +459,28 @@ def analyze_trip_corridor(
         effective_origin = origin
     print(f"[DEBUG] analyze_trip_corridor stops={len(stops)}")
     print(f"[DEBUG] raw_gps={len(raw_gps)}")
+    geo_stops = [s for s in stops if s.get("lat") is not None and s.get("lng") is not None]
+    if not geo_stops:
+        return {
+            "actual_distance_km": 0.0,
+            "expected_distance_km": None,
+            "detour_ratio": None,
+            "off_route_points": 0,
+            "detour_flag": False,
+            "off_route_flag": False,
+            "wrong_turn_u_turn_flag": False,
+            "u_turn_count": 0,
+            "visited_stops": [],
+            "missed_stops": list(stops),
+            "path_points": 0,
+            "corridor_compliance_pct": None,
+            "max_deviation_m": None,
+            "message": "Không có stop nào geocode thành công nên không tính được km kỳ vọng",
+        }
     corridors = build_trip_corridors(stops, origin=effective_origin, buffer_m=corridor_buffer_m)
-
+    geo_stops = [s for s in stops if s.get("lat") is not None and s.get("lng") is not None]
+    print(f"[DEBUG] total stops={len(stops)} | geo_stops={len(geo_stops)}")
+    print(f"[DEBUG] built corridors={len(corridors)}")
     trace = reconstruct_trace(
         df,
         stops=stops,
@@ -474,6 +494,10 @@ def analyze_trip_corridor(
     uturns = detect_uturn(trace.matched_path)
 
     trip_score = score_trip(trace, corridors, stops, u_turn_indices=uturns)
+    print(
+        f"[DEBUG] expected_distance_km={trip_score.expected_distance_km} "
+        f"| actual_distance_km={trip_score.actual_distance_km}"
+    )
     return trip_score.to_dict()
 
 

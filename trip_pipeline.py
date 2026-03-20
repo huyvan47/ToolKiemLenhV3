@@ -450,7 +450,10 @@ def process_one_plate(plate: str, addr_list: Sequence[str], day_code: Optional[s
           f"start={trip_window['start']} end={trip_window['end']}")
 
     trip_report = analyze_trip_corridor(df, stops=stops, origin=origin_res.as_latlng())
-
+    trip_report["_debug_total_stops"] = len(stops)
+    trip_report["_debug_valid_geo_stops"] = sum(
+        1 for s in stops if s.get("lat") is not None and s.get("lng") is not None
+)
     turn_rows = DiaChiNghiVanQuayDau(plate) or []
     valid_turns, suspicious_turns = match_turnaround_to_stops(turn_rows, stops, threshold_m=250)
 
