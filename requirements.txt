@@ -1,0 +1,13 @@
+# Core runtime dependencies
+numpy>=1.24
+pandas>=2.0
+openpyxl>=3.1      # Excel I/O
+xlrd>=1.2          # Legacy .xls read
+polyline>=2.0      # Encode/decode Google polylines
+requests>=2.25     # HTTP client (Google APIs, OSRM)
+
+# Optional — enables .env file loading (recommended for local dev)
+python-dotenv>=1.0
+
+# Optional — needed for Google Roads map-matching provider
+# geopy>=2.0       # install separately if MAP_MATCH_PROVIDER=google_roads

@@ -1,0 +1,23 @@
+# Data / model / cache
+*.csv
+*.json
+*.exe
+
+# =========================
+# PYTHON VIRTUAL ENV
+# =========================
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+.python-version
+.claude
+data/
+
+# =========================
+# PYTHON CACHE
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
