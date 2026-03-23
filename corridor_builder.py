@@ -287,7 +287,17 @@ def build_trip_corridors(
       - origin param  nếu được truyền vào (xe xuất phát từ chi nhánh khác)
       - FIXED_ORIGIN  (global depot) nếu origin=None
     """
-    geo_stops = [s for s in stops if s.get("lat") is not None and s.get("lng") is not None]
+    geo_stops = [
+        s for s in stops
+        if not s.get("route_excluded")
+        and s.get("lat") is not None
+        and s.get("lng") is not None
+    ]
+    print(
+        f"[DEBUG] total stops={len(stops)} | "
+        f"geo_stops={len(geo_stops)} | "
+        f"excluded={sum(1 for s in stops if s.get('route_excluded'))}"
+    )
     if not geo_stops:
         return []
 

@@ -14,6 +14,7 @@ from phat_hien_quay_dau_data import DiaChiNghiVanQuayDau
 from utils import BienSoXeChoFileEpass
 from VeEpassCuaChuyen import LayIndexVe, df as epass_df
 from vtracking_tool import analyze_trip_corridor, analyze_trip_multi_stop, haversine, parse_coord
+from stop_fallback_resolver import enrich_stops_with_vtracking_fallback
 
 
 DATA_DIR = Path(__file__).resolve().parent / "data" / "raw" / "vtracking"
@@ -34,20 +35,71 @@ def load_trip_df(plate: str, day_code: Optional[str] = None) -> pd.DataFrame:
     return pd.read_excel(file_path)
 
 
-def normalize_and_geocode_stops(addr_list: Sequence[str]) -> List[dict]:
+def normalize_and_geocode_stops(
+    addr_list,
+    trip_df=None,
+    apply_vtracking_fallback=True,
+    fallback_match_level="medium",
+):
     normalized = ChuanHoaDiaChiTrongFileLenh(list(addr_list)) or []
-    results: List[dict] = []
+    results = []
+
     for item in normalized:
         try:
             geo = geocode_address_obj(item)
-            results.append({**item, **geo})
+            row = {**item, **geo}
+            results.append(row)
             print(
-            f"[GEOCODE] status={geo.get('status')} "
-            f"error_message={geo.get('error_message')} "
-            f"query={geo.get('query')}"
-        )
+                f"[GEOCODE] status={geo.get('status')} "
+                f"query={geo.get('query')} "
+                f"lat={geo.get('lat')} lng={geo.get('lng')} "
+                f"location_type={geo.get('location_type')} "
+                f"partial_match={geo.get('partial_match')}"
+            )
         except Exception as e:
-            results.append({**item, "status": "ERROR", "lat": None, "lng": None, "geocode_error": str(e)})
+            results.append({
+                **item,
+                "status": "ERROR",
+                "lat": None,
+                "lng": None,
+                "geocode_error": str(e),
+            })
+
+    if apply_vtracking_fallback and trip_df is not None and not trip_df.empty:
+        try:
+            results = enrich_stops_with_vtracking_fallback(
+                stops=results,
+                df=trip_df,
+                api_key=None,
+                min_match_level=fallback_match_level,   # "medium" = khớp huyện+tỉnh là đủ
+            )
+            print("[VT-FALLBACK] applied to geocoded stops")
+
+            usable = [
+                s for s in results
+                if not s.get("route_excluded")
+                and s.get("lat") is not None
+                and s.get("lng") is not None
+            ]
+            excluded = [s for s in results if s.get("route_excluded")]
+
+            print(
+                f"[VT-FALLBACK] total={len(results)} "
+                f"| route_usable={len(usable)} "
+                f"| excluded={len(excluded)}"
+            )
+
+            for s in excluded:
+                label = s.get("raw_text") or s.get("normalized_text") or s.get("query")
+                print(
+                    f"[EXCLUDED] {label} | "
+                    f"reason={s.get('exclude_reason')} | "
+                    f"note={s.get('coord_resolution_note')}"
+                )
+
+        except Exception as e:
+            print(f"[WARN] vtracking fallback failed: {e}")
+
     return results
 
 
@@ -435,10 +487,22 @@ def match_turnaround_to_stops(turn_rows: Sequence[dict], stops: Sequence[dict], 
 
 def process_one_plate(plate: str, addr_list: Sequence[str], day_code: Optional[str] = None) -> Dict[str, Any]:
     df = load_trip_df(plate, day_code=day_code)
-    stops = normalize_and_geocode_stops(addr_list)
+    stops = normalize_and_geocode_stops(
+        addr_list,
+        trip_df=df,
+        apply_vtracking_fallback=True,
+        fallback_match_level="medium",
+    )
+    route_usable_stops = [
+        s for s in stops
+        if not s.get("route_excluded")
+        and s.get("lat") is not None
+        and s.get("lng") is not None
+    ]
     print(f"[DEBUG] plate={plate}")
     print(f"[DEBUG] raw addr_list count={len(addr_list)}")
     print(f"[DEBUG] geocoded stops count={len(stops)}")
+    print(f"[DEBUG] route usable stops count={len(route_usable_stops)}")
     print(f"[DEBUG] geocoded valid lat/lng count={sum(1 for s in stops if s.get('lat') is not None and s.get('lng') is not None)}")
     print(f"[DEBUG] df columns={list(df.columns)}")
     print(f"[DEBUG] valid GPS rows={df['Tọa độ'].notna().sum() if 'Tọa độ' in df.columns else 0}")

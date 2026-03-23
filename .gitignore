@@ -6,6 +6,7 @@
 # =========================
 # PYTHON VIRTUAL ENV
 # =========================
+.env
 venv/
 .venv/
 env/
@@ -21,3 +22,8 @@ data/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# =========================
+# PYTHON CACHE
+# =========================
+.env.example
