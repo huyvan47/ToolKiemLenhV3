@@ -301,85 +301,6 @@ def build_expected_route_multi_stop(origin: LatLng, stops: Sequence[Dict[str, An
     return expected_route, expected_m
 
 
-def analyze_trip_multi_stop(
-    df: pd.DataFrame,
-    stops: Sequence[Dict[str, Any]],
-    origin: Optional[LatLng] = None,
-    min_move_m: float = 25,
-    max_points: int = 120,
-    stop_threshold_m: float = 200,
-    off_route_threshold_m: float = 200,
-) -> Dict[str, Any]:
-    gps_points = [parse_coord(c) for c in df["Tọa độ"] if pd.notna(c)]
-    if len(gps_points) < 2:
-        return {
-            "actual_distance_km": 0.0,
-            "expected_distance_km": None,
-            "detour_ratio": None,
-            "off_route_points": 0,
-            "detour_flag": False,
-            "off_route_flag": False,
-            "wrong_turn_u_turn_flag": False,
-            "visited_stops": [],
-            "missed_stops": list(stops),
-            "path_points": 0,
-            "message": "Không đủ điểm GPS để phân tích",
-        }
-
-    time_col = "Thời gian" if "Thời gian" in df.columns else None
-    gps_times = parse_time_column(df[time_col]).tolist() if time_col else None
-    if gps_times is not None:
-        gps_times = gps_times[: len(gps_points)]
-
-    gps_points, gps_times = thin_gps_points(gps_points, timestamps=gps_times, min_move_m=min_move_m, max_points=max_points)
-    path = map_match(gps_points, timestamps=gps_times, chunk_size=80, radius_m=30)
-
-    actual = _segment_distance(path)
-    uturns = detect_uturn(path)
-    visited_stops, missed_stops = detect_visited_stops(path, stops, threshold_m=stop_threshold_m)
-
-    expected_route: List[LatLng] = []
-    expected_m: Optional[float] = None
-    if origin is None:
-        origin = path[0]
-
-    try:
-        expected_route, expected_m = build_expected_route_multi_stop(origin, stops)
-    except Exception as e:
-        print(f"[WARN] Không xây được route kỳ vọng: {e}")
-        expected_route = []
-        expected_m = None
-
-    off_route_points = 0
-    if expected_route:
-        for p in path:
-            if distance_to_route(p, expected_route) > off_route_threshold_m:
-                off_route_points += 1
-
-    detour_ratio = (actual / expected_m) if expected_m and expected_m > 0 else None
-
-    return {
-        "actual_distance_km": round(actual / 1000, 2),
-        "expected_distance_km": round(expected_m / 1000, 2) if expected_m else None,
-        "detour_ratio": round(detour_ratio, 3) if detour_ratio is not None else None,
-        "off_route_points": off_route_points,
-        "detour_flag": bool(detour_ratio is not None and detour_ratio > 1.3),
-        "off_route_flag": bool(off_route_points > 20),
-        "wrong_turn_u_turn_flag": len(uturns) > 0,
-        "u_turn_count": len(uturns),
-        "visited_stops": visited_stops,
-        "missed_stops": missed_stops,
-        "path_points": len(path),
-        "path_start": path[0],
-        "path_end": path[-1],
-    }
-
-
-def analyze_trip(df: pd.DataFrame, origin: LatLng, dest: LatLng) -> Dict[str, Any]:
-    stops = [{"lat": dest[0], "lng": dest[1], "normalized_text": "destination"}]
-    return analyze_trip_multi_stop(df, stops=stops, origin=origin)
-
-
 def analyze_trip_corridor(
     df: pd.DataFrame,
     stops: Sequence[Dict[str, Any]],
@@ -507,6 +428,5 @@ if __name__ == "__main__":
         df = pd.read_excel(sample_file)
         origin = (10.8708, 106.4252)
         dest = (10.736662, 106.670769)
-        print(analyze_trip(df, origin, dest))
     else:
         print(f"Không tìm thấy file mẫu {sample_file}")

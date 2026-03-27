@@ -35,22 +35,32 @@ def _save_cache() -> None:
 
 
 def build_query(addr_obj: dict) -> str:
-    """Ghép chuỗi geocode từ dữ liệu GPT chuẩn hóa."""
-    parts: List[str] = []
+    """Ghép query geocode sạch, tránh lặp ward/district/province."""
+    normalized_text = str(addr_obj.get("normalized_text") or "").strip().strip(",")
+    ward = str(addr_obj.get("ward") or "").strip().strip(",")
+    district = str(addr_obj.get("district") or "").strip().strip(",")
+    province = str(addr_obj.get("province") or "").strip().strip(",")
 
-    normalized_text = str(addr_obj.get("normalized_text") or "").strip()
-    ward = str(addr_obj.get("ward") or "").strip()
-    district = str(addr_obj.get("district") or "").strip()
-    province = str(addr_obj.get("province") or "").strip()
+    base = normalized_text
+    base_lower = base.lower()
 
-    if normalized_text:
-        parts.append(normalized_text)
+    extras = []
     for p in [ward, district, province]:
-        if p and p not in parts:
-            parts.append(p)
-    if not parts or parts[-1].lower() != "việt nam":
-        parts.append("Việt Nam")
-    return ", ".join(parts)
+        if not p:
+            continue
+        if p.lower() not in base_lower:
+            extras.append(p)
+
+    parts = []
+    if base:
+        parts.append(base)
+    parts.extend(extras)
+
+    full = ", ".join(parts).strip(", ")
+    if "việt nam" not in full.lower():
+        full = f"{full}, Việt Nam" if full else "Việt Nam"
+
+    return full
 
 
 def _cache_key(query: str) -> str:
@@ -110,14 +120,6 @@ def geocode_query(query: str, api_key: Optional[str] = None, force_refresh: bool
 def geocode_address_obj(addr_obj: dict, api_key: Optional[str] = None, force_refresh: bool = False) -> Dict[str, Any]:
     query = build_query(addr_obj)
     return geocode_query(query=query, api_key=api_key, force_refresh=force_refresh)
-
-
-def geocode_many(addresses: Iterable[dict], api_key: Optional[str] = None, force_refresh: bool = False) -> List[dict]:
-    rows: List[dict] = []
-    for addr in addresses:
-        geo = geocode_address_obj(addr, api_key=api_key, force_refresh=force_refresh)
-        rows.append({**addr, **geo})
-    return rows
 
 
 if __name__ == "__main__":

@@ -109,10 +109,18 @@ def geocode_confidence(stop: Dict[str, Any]) -> str:
 
     loc_type = str(stop.get("location_type") or "").upper()
     partial = bool(stop.get("partial_match"))
-    formatted = str(stop.get("formatted_address") or "")
+    formatted = str(
+        stop.get("geocoded_formatted_address") or stop.get("formatted_address") or ""
+    )
+    # Compare CANONICAL admin (stop["ward/district/province"] after OLD-admin
+    # canonical override) against the geocoder's formatted_address.
+    # This correctly gives low confidence when the geocoder returned a different
+    # province (e.g. "Đồng Tháp") from the canonical OLD-admin ("Tiền Giang").
+    # geocoded_province is now the province parsed FROM formatted_address and
+    # must NOT be used here — it would cause a false-positive match with itself.
+    ward     = str(stop.get("ward")     or "")
     district = str(stop.get("district") or "")
     province = str(stop.get("province") or "")
-    ward = str(stop.get("ward") or "")
 
     admin_hits = 0
     if ward and _contains_token(formatted, ward):
@@ -137,6 +145,80 @@ def geocode_confidence(stop: Dict[str, Any]) -> str:
 # ----------------------------
 # reverse geocode helpers
 # ----------------------------
+
+import re
+
+def sanitize_and_validate_address(addr_obj: dict, expected_province: str = None) -> dict:
+    def clean_text(s: str) -> str:
+        if not s:
+            return ""
+        s = str(s)
+        s = re.sub(r"thu\s*\d[\d\.,]*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"[-–—]+", " ", s)
+        s = re.sub(r",\s*,+", ", ", s)
+        s = re.sub(r"\s+", " ", s)
+        return s.strip(" ,.")
+
+    normalized_text = clean_text(addr_obj.get("normalized_text"))
+    ward = clean_text(addr_obj.get("ward"))
+    district = clean_text(addr_obj.get("district"))
+    province = clean_text(addr_obj.get("province"))
+
+    if expected_province:
+        province_mismatch = (
+            province and expected_province.lower() not in province.lower()
+        )
+    else:
+        province_mismatch = False
+
+    return {
+        "normalized_text": normalized_text,
+        "ward": ward,
+        "district": district,
+        "province": province,
+        "_province_mismatch": province_mismatch,
+    }
+
+
+def score_geocode_candidate(candidate: dict, addr_obj: dict, expected_province: str = None) -> float:
+    score = 0.0
+
+    formatted = (candidate.get("formatted_address") or "").lower()
+    location_type = (candidate.get("location_type") or "").upper()
+    partial = candidate.get("partial_match", False)
+
+    ward = (addr_obj.get("ward") or "").lower()
+    district = (addr_obj.get("district") or "").lower()
+    province = (addr_obj.get("province") or "").lower()
+
+    if province and province in formatted:
+        score += 50
+    else:
+        score -= 100
+
+    if district and district in formatted:
+        score += 25
+
+    if ward and ward in formatted:
+        score += 15
+
+    if location_type == "ROOFTOP":
+        score += 15
+    elif location_type == "GEOMETRIC_CENTER":
+        score += 5
+    elif location_type == "APPROXIMATE":
+        score -= 10
+
+    if partial:
+        score -= 10
+
+    if expected_province:
+        if expected_province.lower() in formatted:
+            score += 50
+        else:
+            score -= 200
+
+    return score
 
 def _extract_admin_sets_from_results(results: Sequence[Dict[str, Any]]) -> Dict[str, Set[str]]:
     wards: Set[str] = set()
@@ -242,7 +324,23 @@ def reverse_geocode(lat: float, lng: float, api_key: Optional[str] = None) -> Di
             },
         }
 
-    top = results[0]
+    cleaned = sanitize_and_validate_address(
+        item,
+        expected_province=item.get("province")
+    )
+
+    scored = []
+    for c in results:
+        s = score_geocode_candidate(
+            c,
+            cleaned,
+            expected_province=cleaned.get("province")
+        )
+        scored.append((s, c))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_score, top = scored[0]
+
     comp_map: Dict[str, str] = {}
     for comp in top.get("address_components", []) or []:
         long_name = comp.get("long_name")
@@ -711,8 +809,8 @@ def _infer_missing_stop_admin_from_text(stop: Dict[str, Any]) -> Dict[str, str]:
             raw = str(cand)
             break
 
-    norm = _norm_text(raw)
-    parts = [_norm_admin_name(x) for x in norm.split(",")]
+    raw_parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+    parts = [_norm_admin_name(x) for x in raw_parts]
     parts = [x for x in parts if x and x not in {"viet nam", "vietnam", "vn"}]
 
     ward = _norm_admin_name(stop.get("ward") or "")
@@ -898,8 +996,8 @@ def enrich_stops_with_vtracking_distance_fallback(
     stops: Sequence[Dict[str, Any]],
     df: pd.DataFrame,
     api_key: Optional[str] = None,
-    default_accept_radius_km: float = 8.0,
-    max_cluster_candidate_dist_m: float = 12000.0,
+    default_accept_radius_km: float = 20.0,
+    max_cluster_candidate_dist_m: float = 20000.0,
     weak_scan_radius_m: float = 12000.0,
 ) -> List[Dict[str, Any]]:
     """
@@ -976,7 +1074,9 @@ def enrich_stops_with_vtracking_distance_fallback(
             if p is None:
                 continue
 
-            if p["distance_m"] > max_cluster_candidate_dist_m:
+            effective_cluster_scan_m = max(max_cluster_candidate_dist_m, accept_threshold_m)
+
+            if p["distance_m"] > effective_cluster_scan_m:
                 continue
 
             score = _score_cluster_distance_candidate(
@@ -1035,11 +1135,14 @@ def enrich_stops_with_vtracking_distance_fallback(
         # -------------------------
         # 2) weak candidates
         # -------------------------
+
+        effective_weak_scan_m = max(weak_scan_radius_m, accept_threshold_m)
+
         weak_points = _scan_weak_points_near_anchor(
             df=df,
             anchor_lat=float(stop_lat),
             anchor_lng=float(stop_lng),
-            max_anchor_dist_m=weak_scan_radius_m,
+            max_anchor_dist_m=effective_weak_scan_m,
             max_speed_kmh=20.0,
             max_points=30,
         )
@@ -1125,7 +1228,7 @@ def enrich_stops_with_vtracking_fallback(
         stops=stops,
         df=df,
         api_key=api_key,
-        default_accept_radius_km=8.0,
+        default_accept_radius_km=20.0,
         max_cluster_candidate_dist_m=12000.0,
-        weak_scan_radius_m=12000.0,
+        weak_scan_radius_m=20000.0,
     )
