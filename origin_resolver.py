@@ -30,71 +30,148 @@ LatLng = Tuple[float, float]
 _REGISTRY_PATH = Path(__file__).resolve().parent / "vehicle_origins.json"
 
 # Module-level cache — populated lazily on first call.
-_registry: Optional[Dict[str, LatLng]] = None
+_registry: Optional[Dict[str, Dict[str, Optional[LatLng]]]] = None
 
 
-def _load_registry() -> Dict[str, LatLng]:
-    """Read vehicle_origins.json once and cache the result."""
+def _parse_latlng(value) -> Optional[LatLng]:
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+    ):
+        try:
+            return (float(value[0]), float(value[1]))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _load_registry() -> Dict[str, Dict[str, Optional[LatLng]]]:
+    """Read vehicle_origins.json once and cache the result.
+
+    Supported formats:
+      1) Legacy:
+         { "<plate>": [lat, lng] }
+
+      2) New:
+         {
+           "<plate>": {
+             "start": [lat, lng],
+             "end": [lat, lng]   # optional
+           }
+         }
+
+    Rules:
+      - legacy [lat, lng] -> start = end = that point
+      - new object with start only -> end = start
+      - new object with start+end -> use both
+      - malformed rows are skipped
+    """
     global _registry
     if _registry is not None:
         return _registry
+
     if not _REGISTRY_PATH.exists():
         _registry = {}
         return _registry
+
     try:
-        raw: dict = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
-        parsed: Dict[str, LatLng] = {}
-        for plate, coords in raw.items():
-            if (
-                isinstance(coords, (list, tuple))
-                and len(coords) == 2
-            ):
-                try:
-                    parsed[str(plate)] = (float(coords[0]), float(coords[1]))
-                except (TypeError, ValueError):
-                    pass  # skip malformed entry
+        raw = json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
+        parsed: Dict[str, Dict[str, Optional[LatLng]]] = {}
+
+        for plate, value in raw.items():
+            # bỏ qua metadata như _comment, _format
+            if str(plate).startswith("_"):
+                continue
+
+            plate_key = str(plate).strip()
+
+            # --- Legacy format: "<plate>": [lat, lng]
+            legacy_point = _parse_latlng(value)
+            if legacy_point is not None:
+                parsed[plate_key] = {
+                    "start": legacy_point,
+                    "end": legacy_point,
+                }
+                continue
+
+            # --- New format: "<plate>": {"start": [...], "end": [...]}
+            if isinstance(value, dict):
+                start_point = _parse_latlng(value.get("start"))
+                end_point = _parse_latlng(value.get("end"))
+
+                if start_point is None:
+                    # không có start hợp lệ thì bỏ qua entry
+                    continue
+
+                if end_point is None:
+                    end_point = start_point
+
+                parsed[plate_key] = {
+                    "start": start_point,
+                    "end": end_point,
+                }
+                continue
+
+            # format khác thì bỏ qua
+            continue
+
         _registry = parsed
+
     except Exception as exc:
         print(f"[WARN] origin_resolver: không đọc được vehicle_origins.json: {exc}")
         _registry = {}
-    return _registry
 
+    return _registry
 
 @dataclass
 class OriginResolution:
-    """Result of resolving a trip origin for one plate."""
-    lat: float
-    lng: float
+    start_lat: float
+    start_lng: float
+    end_lat: Optional[float]
+    end_lng: Optional[float]
     source: str  # "vehicle_registry" | "global_default"
 
-    def as_latlng(self) -> LatLng:
-        return (self.lat, self.lng)
+    def start_as_latlng(self) -> LatLng:
+        return (self.start_lat, self.start_lng)
+
+    def end_as_latlng(self) -> Optional[LatLng]:
+        if self.end_lat is None or self.end_lng is None:
+            return None
+        return (self.end_lat, self.end_lng)
 
 
 def resolve_trip_origin(plate: str) -> OriginResolution:
     """
-    Return the trip-origin coordinate for *plate*.
+    Return the configured trip endpoints for *plate*.
 
-    Parameters
-    ----------
-    plate : str
-        Vehicle plate number, exactly as it appears as a key in
-        vehicle_origins.json (and as passed through trip_pipeline).
-
-    Returns
-    -------
-    OriginResolution
-        .lat / .lng : coordinate to use as trip start/end
-        .source     : "vehicle_registry" if a per-plate entry was found,
-                      "global_default"   if the system-wide depot is used
+    Rules:
+      - if vehicle_origins.json has plate -> use it
+      - else use maps_config depot as both start and end
     """
     registry = _load_registry()
+
     if plate in registry:
-        lat, lng = registry[plate]
-        return OriginResolution(lat=lat, lng=lng, source="vehicle_registry")
+        row = registry[plate]
+        start = row.get("start")
+        end = row.get("end") or start
+
+        if start is not None:
+            return OriginResolution(
+                start_lat=start[0],
+                start_lng=start[1],
+                end_lat=end[0] if end else None,
+                end_lng=end[1] if end else None,
+                source="vehicle_registry",
+            )
 
     depot = maps_config.get_depot_origin()
-    return OriginResolution(lat=depot[0], lng=depot[1], source="global_default")
+    return OriginResolution(
+        start_lat=depot[0],
+        start_lng=depot[1],
+        end_lat=depot[0],
+        end_lng=depot[1],
+        source="global_default",
+    )
 
 
 def reload_registry() -> None:

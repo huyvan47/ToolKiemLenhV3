@@ -950,103 +950,71 @@ def build_trip_window_from_df(df: pd.DataFrame) -> Tuple[Optional[str], Optional
 
 def detect_trip_window_from_origin(
     df: pd.DataFrame,
-    origin: Optional[Tuple[float, float]],
+    start_origin: Optional[Tuple[float, float]],
+    end_origin: Optional[Tuple[float, float]] = None,
     origin_radius_m: float = 700.0,
     return_radius_m: Optional[float] = 200.0,
     min_consecutive_points: int = 3,
     min_moving_speed_kmh: float = 5.0,
+    require_return: bool = False,
 ) -> dict:
     """
-    Detect trip departure and return times using origin-zone crossing with
-    movement-context awareness.
+    Detect departure from start_origin and optional arrival to end_origin.
 
-    Problem with naive zone-crossing
-    ---------------------------------
-    A truck may be parked overnight at a spot that is OUTSIDE the origin radius
-    (e.g. a branch depot 844 m from the configured origin).  Without movement
-    awareness, the very first GPS row (parked at 00:00) would be classified as
-    "outside origin" and immediately confirm a false departure.
+    Behavior
+    --------
+    Phase 1 — departure detection:
+      Departure is confirmed when there are `min_consecutive_points`
+      consecutive MOVING rows outside `origin_radius_m` from start_origin.
+      Departure time = timestamp of the first row in that confirmed run.
 
-    Solution
-    ---------
-    Phase 1 — seek departure (movement-aware):
-      Only MOVING rows (speed > min_moving_speed_kmh AND status not "stop")
-      participate in departure confirmation.  Stopped/idle rows are silently
-      skipped — they neither advance nor reset the departure counter.  This
-      ensures pre-trip parked rows (even if outside the radius) cannot trigger
-      a false departure.
+    Phase 2 — arrival detection:
+      If end_origin is provided, arrival is confirmed when there are
+      `min_consecutive_points` consecutive valid rows inside `return_radius_m`
+      of end_origin. If end_origin is None, it defaults to start_origin.
 
-      Departure is confirmed when min_consecutive_points consecutive MOVING rows
-      are found outside origin_radius_m.  Departure time = timestamp of the FIRST
-      moving outside row in that run (i.e. when the truck first started moving
-      away, not the Nth confirmation point).
+      Special guard:
+      - when start_origin == end_origin, arrival detection is armed only after
+        the truck has moved sufficiently far away from the start zone
+        (2 * origin_radius_m). This prevents false "returned" detection on
+        outbound clips near the depot.
+      - when start_origin != end_origin, arrival is checked directly without
+        arm-guard.
 
-    Phase 2 — seek return (tighter inner zone):
-      After departure is confirmed, return is detected using return_radius_m
-      (default 200 m), which is deliberately tighter than origin_radius_m.
-      This avoids confirming a return when the truck merely skirts the outer
-      edge of the origin zone.
+    Open trip mode
+    --------------
+    If `require_return=False` and departure is confirmed but no arrival is
+    confirmed, the trip is still returned with:
+      - end = last valid GPS timestamp
+      - status = departed_open_trip / started_outside_open_trip
 
-      Return is confirmed after min_consecutive_points consecutive GPS points
-      inside return_radius_m.  Return time = timestamp of the FIRST qualifying
-      inside point in that run.
-
-    Movement classification
-    -----------------------
-    A row is classified as IDLE (not moving) if any of:
-      - "Tốc độ" / speed column value ≤ min_moving_speed_kmh
-      - "Trạng thái" / status column contains "stop", "dừng", or "dung"
-    If neither column is present, every row is treated as moving (safe default
-    — existing tests have no speed/status columns).
-
-    Parameters
-    ----------
-    origin_radius_m
-        Departure zone radius (metres).  Truck must exit this zone for departure.
-        Default 700 m.
-    return_radius_m
-        Return confirmation zone radius (metres).  Must be ≤ origin_radius_m.
-        Default 200 m.  Pass None to use origin_radius_m (backward-compatible
-        but may confirm return too early for trucks with parking outside origin).
-    min_consecutive_points
-        Number of consecutive qualifying rows to confirm departure or return.
-        Default 3.
-    min_moving_speed_kmh
-        Speed below which a row is treated as idle (skipped for departure
-        detection).  Default 5.0 km/h.
+    Fallback
+    --------
+    If required columns are missing, origin is not provided, or there are no
+    valid GPS rows, the function falls back to min/max timestamps from df.
 
     Returns
     -------
     dict with keys:
-      start               HH:MM string (departure time) or None
-      end                 HH:MM string (return time) or None
-      departure_index     row index of first moving-outside point in confirmed
-                          departure run, or None
-      return_index        row index of first inside-return-zone point in
-                          confirmed return run, or None
-      detection_method    "origin_radius"
-      origin_radius_m     float
-      return_radius_m     float  (actual radius used for return detection)
-      status              short outcome code (see below)
-      n_valid_points      int  — rows with parseable coord + timestamp
-      n_inside_points     int  — rows inside origin_radius_m
-      n_outside_points    int
-      started_inside      bool or None
-      fallback_used       bool
-      fallback_reason     str  (only present when fallback_used=True)
-
-    Status codes
-    ------------
-      departed_and_returned       — normal closed trip
-      started_outside_returned    — file starts outside origin; truck came back
-      departed_no_return          — left depot, file ends before return
-      started_outside_no_return   — file starts outside, no return seen
-      never_departed              — truck stayed in origin zone throughout
+      start
+      end
+      departure_index
+      return_index
+      detection_method
+      origin_radius_m
+      return_radius_m
+      status
+      n_valid_points
+      n_inside_points
+      n_outside_points
+      started_inside
+      fallback_used
+      fallback_reason (only when fallback_used=True)
+      returned_to_end_origin
+      require_return
     """
-
     _return_r: float = return_radius_m if return_radius_m is not None else origin_radius_m
 
-    # --- Internal fallback (min/max timestamp) --------------------------------
     def _fallback(reason: str) -> dict:
         start, end = build_trip_window_from_df(df)
         return {
@@ -1064,39 +1032,40 @@ def detect_trip_window_from_origin(
             "started_inside": None,
             "fallback_used": True,
             "fallback_reason": reason,
+            "returned_to_end_origin": False,
+            "require_return": require_return,
         }
 
-    if origin is None:
+    if start_origin is None:
         return _fallback("origin_not_provided")
+
+    if end_origin is None:
+        end_origin = start_origin
+
+    start_lat, start_lng = float(start_origin[0]), float(start_origin[1])
+    end_lat, end_lng = float(end_origin[0]), float(end_origin[1])
 
     if "Tọa độ" not in df.columns or "Thời gian" not in df.columns or df.empty:
         return _fallback("missing_required_columns")
 
-    origin_lat = float(origin[0])
-    origin_lng = float(origin[1])
-
-    # Parse all timestamps up-front (vectorised, fast)
-    timestamps: pd.Series = pd.to_datetime(  # type: ignore[assignment]
+    timestamps: pd.Series = pd.to_datetime(
         df["Thời gian"], errors="coerce", dayfirst=True
     )
 
-    # --- Detect speed / status columns (robust to column-name variants) -------
     _speed_col: Optional[str] = next(
-        (c for c in df.columns if "tốc" in c.lower() or "speed" in c.lower()), None
+        (c for c in df.columns if "tốc" in c.lower() or "speed" in c.lower()),
+        None,
     )
     _status_col: Optional[str] = next(
-        (c for c in df.columns
-         if "trạng" in c.lower() or "trang" in c.lower() or "status" in c.lower()),
+        (
+            c for c in df.columns
+            if "trạng" in c.lower() or "trang" in c.lower() or "status" in c.lower()
+        ),
         None,
     )
     _IDLE_STATUS_KEYS = ("stop", "dừng", "dung")
 
     def _is_moving(row_i: int) -> bool:
-        """True if this GPS row represents a moving (non-parked) truck.
-
-        Falls back to True (moving) when speed and status info are unavailable,
-        preserving backward compatibility with DataFrames that have no such cols.
-        """
         if _speed_col is not None:
             spd = df[_speed_col].iloc[row_i]
             if pd.notna(spd):
@@ -1105,18 +1074,21 @@ def detect_trip_window_from_origin(
                         return False
                 except (TypeError, ValueError):
                     pass
+
         if _status_col is not None:
             st = str(df[_status_col].iloc[row_i]).strip().lower()
             if any(k in st for k in _IDLE_STATUS_KEYS):
                 return False
+
         return True
 
-    # --- State machine --------------------------------------------------------
+    coord_col = df["Tọa độ"]
+
     consecutive_outside: int = 0
     consecutive_inside_post_dep: int = 0
 
     departure_confirmed: bool = False
-    departure_candidate: Optional[Tuple[Any, int]] = None  # (ts, row_idx)
+    departure_candidate: Optional[Tuple[Any, int]] = None
     departure_ts = None
     departure_index: Optional[int] = None
 
@@ -1125,24 +1097,22 @@ def detect_trip_window_from_origin(
     return_ts = None
     return_index: Optional[int] = None
 
-    # Return-arming: only activate return detection after the truck has been
-    # sufficiently far from origin.  This prevents an outbound pass near the
-    # origin (within return_radius_m) from being mistaken for a return when
-    # the truck's parking spot is outside origin_radius_m and its outbound
-    # route clips the origin area on the way out.
-    # Threshold: 2 × origin_radius_m.  A truck that parks at 844 m and
-    # departs toward origin (max_dist stays ~844 m < 1400 m) will NOT arm
-    # the detector until it has driven to actual delivery distances.
-    _return_arm_dist: float = origin_radius_m * 2.0
-    max_dist_since_dep: float = 0.0
-    return_armed: bool = False
+    last_valid_ts = None
+    last_valid_index: Optional[int] = None
 
     n_valid: int = 0
     n_inside: int = 0
     n_outside: int = 0
     started_inside: Optional[bool] = None
 
-    coord_col = df["Tọa độ"]
+    same_start_end = (
+        abs(start_lat - end_lat) < 1e-9 and
+        abs(start_lng - end_lng) < 1e-9
+    )
+
+    _return_arm_dist: float = origin_radius_m * 2.0
+    max_dist_since_dep: float = 0.0
+    return_armed: bool = False
 
     for row_idx in range(len(df)):
         ts = timestamps.iloc[row_idx]
@@ -1150,90 +1120,94 @@ def detect_trip_window_from_origin(
 
         if pd.isna(ts) or pd.isna(coord_raw):
             continue
+
         try:
             lat, lng = parse_coord(str(coord_raw))
         except Exception:
             continue
 
         n_valid += 1
-        dist = haversine(lat, lng, origin_lat, origin_lng)
-        is_inside = dist <= origin_radius_m
+        last_valid_ts = ts
+        last_valid_index = row_idx
+
+        dist_from_start = haversine(lat, lng, start_lat, start_lng)
+        is_outside_start = dist_from_start > origin_radius_m
+        is_inside_start = not is_outside_start
+
+        dist_to_end = haversine(lat, lng, end_lat, end_lng)
+        is_inside_end = dist_to_end <= _return_r
 
         if started_inside is None:
-            started_inside = is_inside
+            started_inside = is_inside_start
 
-        if is_inside:
+        if is_inside_start:
             n_inside += 1
         else:
             n_outside += 1
 
-        # ---- Phase 1: seek departure -----------------------------------------
-        # Only MOVING rows participate.  Idle/stopped rows are silently ignored
-        # so that a truck parked outside origin before the trip does not trigger
-        # a premature departure confirmation.
+        # Phase 1: confirm departure from start_origin
         if not departure_confirmed:
             if _is_moving(row_idx):
-                if is_inside:
-                    # Moving inside origin zone — reset departure run
+                if is_inside_start:
+                    # still in origin zone -> reset outside-run
                     consecutive_outside = 0
                     departure_candidate = None
                 else:
-                    # Moving outside origin zone — advance departure run
+                    # moving outside origin zone -> advance departure run
                     consecutive_outside += 1
                     if departure_candidate is None:
                         departure_candidate = (ts, row_idx)
+
                     if consecutive_outside >= min_consecutive_points:
                         departure_confirmed = True
                         departure_ts = departure_candidate[0]
                         departure_index = departure_candidate[1]
-            # else: idle row — skip silently (don't count, don't reset)
+            continue
 
-        # ---- Phase 2: seek return (only after confirmed departure) -----------
-        # Uses return_radius_m (tighter inner zone) to avoid false positives
-        # from trucks that merely pass near the origin edge while on route.
-        #
-        # Return-arming guard: tracks the maximum distance reached since
-        # departure.  The return zone is only armed once the truck has been at
-        # least _return_arm_dist (2 × origin_radius_m) away from origin.
-        # This prevents a short outbound detour near the origin (e.g. a truck
-        # whose parking lot is ~844 m from the depot and whose outbound route
-        # clips within 200 m of the depot) from being mis-classified as a
-        # return just minutes after departure.
-        else:
-            max_dist_since_dep = max(max_dist_since_dep, dist)
-            if not return_armed and max_dist_since_dep >= _return_arm_dist:
+        # Phase 2: confirm arrival to end_origin
+        if same_start_end:
+            max_dist_since_dep = max(max_dist_since_dep, dist_from_start)
+            if max_dist_since_dep >= _return_arm_dist:
                 return_armed = True
+            can_check_arrival = return_armed and is_inside_end
+        else:
+            can_check_arrival = is_inside_end
 
-            if return_armed:
-                is_inside_return_zone = dist <= _return_r
-                if is_inside_return_zone:
-                    consecutive_inside_post_dep += 1
-                    if return_candidate is None:
-                        return_candidate = (ts, row_idx)
-                    if consecutive_inside_post_dep >= min_consecutive_points:
-                        return_confirmed = True
-                        return_ts = return_candidate[0]
-                        return_index = return_candidate[1]
-                        break  # early exit — both events found
-                else:
-                    # Outside return zone — reset inside run
-                    consecutive_inside_post_dep = 0
-                    return_candidate = None
+        if can_check_arrival:
+            if consecutive_inside_post_dep == 0:
+                return_candidate = (ts, row_idx)
+            consecutive_inside_post_dep += 1
+
+            if consecutive_inside_post_dep >= min_consecutive_points:
+                return_confirmed = True
+                return_ts = return_candidate[0] if return_candidate else ts
+                return_index = return_candidate[1] if return_candidate else row_idx
+                break
+        else:
+            consecutive_inside_post_dep = 0
+            return_candidate = None
 
     if n_valid == 0:
         return _fallback("no_valid_gps_points")
 
-    # --- Determine status -----------------------------------------------------
+    returned_to_end_origin = return_confirmed
+
+    if departure_confirmed and not return_confirmed and not require_return:
+        return_ts = last_valid_ts
+        return_index = last_valid_index
+
     if not departure_confirmed:
         status = "never_departed"
-    elif started_inside and return_confirmed:
-        status = "departed_and_returned"
-    elif not started_inside and return_confirmed:
-        status = "started_outside_returned"
-    elif started_inside and not return_confirmed:
-        status = "departed_no_return"
+    elif return_confirmed:
+        if started_inside:
+            status = "departed_and_arrived_end"
+        else:
+            status = "started_outside_arrived_end"
     else:
-        status = "started_outside_no_return"
+        if started_inside:
+            status = "departed_open_trip" if not require_return else "departed_no_return"
+        else:
+            status = "started_outside_open_trip" if not require_return else "started_outside_no_return"
 
     def _fmt(ts_val) -> Optional[str]:
         if ts_val is None or pd.isna(ts_val):
@@ -1257,6 +1231,8 @@ def detect_trip_window_from_origin(
         "n_outside_points": n_outside,
         "started_inside": started_inside,
         "fallback_used": False,
+        "returned_to_end_origin": returned_to_end_origin,
+        "require_return": require_return,
     }
 
 
@@ -1457,13 +1433,28 @@ def process_one_plate(plate: str, addr_list: Sequence[str], day_code: Optional[s
     print(f"[DEBUG] df columns={list(df.columns)}")
     print(f"[DEBUG] valid GPS rows={df['Tọa độ'].notna().sum() if 'Tọa độ' in df.columns else 0}")
     origin_res = origin_resolver.resolve_trip_origin(plate)
-    print(f"[DEBUG] origin=({origin_res.lat}, {origin_res.lng}) source={origin_res.source}")
+    print(
+        f"[DEBUG] start_origin=({origin_res.start_lat}, {origin_res.start_lng}) "
+        f"end_origin=({origin_res.end_lat}, {origin_res.end_lng}) "
+        f"source={origin_res.source}"
+    )
 
-    trip_window = detect_trip_window_from_origin(df, origin_res.as_latlng())
+    trip_window = detect_trip_window_from_origin(
+        df,
+        start_origin=origin_res.start_as_latlng(),
+        end_origin=origin_res.end_as_latlng(),
+    )
     print(f"[DEBUG] trip_window status={trip_window['status']} "
           f"start={trip_window['start']} end={trip_window['end']}")
+    start = origin_res.start_as_latlng()
+    end = origin_res.end_as_latlng()
 
-    trip_report = analyze_trip_corridor(df, stops=stops, origin=origin_res.as_latlng())
+    trip_report = analyze_trip_corridor(
+        df,
+        stops=stops,
+        origin=start,
+        end_origin=end,
+    )
     trip_report["_debug_total_stops"] = len(stops)
     trip_report["_debug_valid_geo_stops"] = sum(
         1 for s in stops if s.get("lat") is not None and s.get("lng") is not None
@@ -1477,8 +1468,10 @@ def process_one_plate(plate: str, addr_list: Sequence[str], day_code: Optional[s
     return {
         "plate": plate,
         "trip_window": trip_window,
-        "origin_lat": origin_res.lat,
-        "origin_lng": origin_res.lng,
+        "start_origin_lat": origin_res.start_lat,
+        "start_origin_lng": origin_res.start_lng,
+        "end_origin_lat": origin_res.end_lat,
+        "end_origin_lng": origin_res.end_lng,
         "origin_source": origin_res.source,
         "stops": stops,
         "trip_report": trip_report,
@@ -1528,18 +1521,6 @@ def export_summary_excel(reports: Sequence[Dict[str, Any]], filename: str = "tri
             "Giờ về": report.get("trip_window", {}).get("end"),
             "Km thực tế": trip.get("actual_distance_km"),
             "Km kỳ vọng": trip.get("expected_distance_km"),
-            "Tỷ lệ vòng": trip.get("detour_ratio"),
-            "Lệch tuyến": trip.get("off_route_points"),
-            "Có quay đầu": trip.get("wrong_turn_u_turn_flag"),
-            "Điểm giao đã ghé": len(trip.get("visited_stops", [])),
-            "Điểm giao bỏ sót": len(trip.get("missed_stops", [])),
-            "Quay đầu hợp lệ": len(report.get("turnaround_valid", [])),
-            "Quay đầu nghi vấn": len(report.get("turnaround_suspicious", [])),
-            "Số vé ePass": report.get("epass_count"),
-            # new corridor columns
-            "Tuân thủ hành lang (%)": trip.get("corridor_compliance_pct"),
-            "Lệch tối đa (m)": trip.get("max_deviation_m"),
-            "Chân hàng tệ nhất": trip.get("worst_leg_idx"),
         })
 
     path = REPORT_DIR / filename

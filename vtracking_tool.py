@@ -300,11 +300,11 @@ def build_expected_route_multi_stop(origin: LatLng, stops: Sequence[Dict[str, An
         current = dest
     return expected_route, expected_m
 
-
 def analyze_trip_corridor(
     df: pd.DataFrame,
     stops: Sequence[Dict[str, Any]],
     origin: Optional[LatLng] = None,
+    end_origin: Optional[LatLng] = None,
     min_move_m: float = 25,
     max_points: int = 300,
     corridor_buffer_m: float = 200,
@@ -398,7 +398,12 @@ def analyze_trip_corridor(
             "max_deviation_m": None,
             "message": "Không có stop nào geocode thành công nên không tính được km kỳ vọng",
         }
-    corridors = build_trip_corridors(stops, origin=effective_origin, buffer_m=corridor_buffer_m)
+    corridors = build_trip_corridors(
+        stops,
+        origin=effective_origin,
+        end_origin=end_origin,
+        buffer_m=corridor_buffer_m,
+    )
     geo_stops = [s for s in stops if s.get("lat") is not None and s.get("lng") is not None]
     print(f"[DEBUG] total stops={len(stops)} | geo_stops={len(geo_stops)}")
     print(f"[DEBUG] built corridors={len(corridors)}")

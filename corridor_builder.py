@@ -275,6 +275,7 @@ def build_leg_corridor(
 def build_trip_corridors(
     stops: Sequence[dict],
     origin: Optional[LatLng] = None,
+    end_origin: Optional[LatLng] = None,
     buffer_m: float = CORRIDOR_BUFFER_M,
 ) -> List[CorridorLeg]:
     """
@@ -307,7 +308,16 @@ def build_trip_corridors(
     waypoints.extend((float(s["lat"]), float(s["lng"])) for s in geo_stops)
 
     # Luôn khép vòng: leg cuối quay về cùng điểm xuất phát
-    waypoints.append(effective_origin)
+    waypoints: List[LatLng] = [effective_origin]
+    waypoints.extend((float(s["lat"]), float(s["lng"])) for s in geo_stops)
+
+    # --- NEW LOGIC ---
+    if end_origin is not None:
+        waypoints.append(end_origin)
+    else:
+        # giữ backward compatibility nếu muốn
+        if maps_config.is_return_leg_enabled():
+            waypoints.append(effective_origin)
 
     if len(waypoints) < 2:
         return []

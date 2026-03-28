@@ -181,7 +181,7 @@ def is_return_leg_enabled() -> bool:
     only (origin → stop1 → … → stopN), regardless of this setting.
     The return leg affects corridor_compliance_pct but not detour_ratio.
     """
-    return _bool_env("ENABLE_RETURN_LEG", True)
+    return _bool_env("ENABLE_RETURN_LEG", False)
 
 
 def is_avoid_tolls_enabled() -> bool:
